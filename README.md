@@ -1,4 +1,4 @@
 # FractSynth
 
 Paper: 
-https://drive.google.com/file/d/1YDj8z5pb1BMtOTdB350C_C8RukZnCtmX/view?usp=sharing
+https://drive.google.com/file/d/17mPlG82fAuwnYW6FIO9aM1inLdy-OLhs/view?usp=sharing
