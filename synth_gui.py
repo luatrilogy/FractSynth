@@ -68,11 +68,30 @@ class FractSynthGUI(QWidget):
         layout.addWidget(QLabel("Chaos Type"))
         layout.addWidget(self.chaos_type_box)
 
+        # BLOCKSIZE SLIDER
+        BLOCKSIZE = 8192 #6144 
+        self.current_blocksize = BLOCKSIZE
+
+        self.blocksize_label = QLabel("Blocksize - ")
+        self.blocksize_slider = QSlider(Qt.Horizontal)
+        self.blocksize_slider.setMinimum(128)
+        self.blocksize_slider.setMaximum(16384)
+        self.blocksize_slider.setValue(8192)
+        self.blocksize_slider.setSingleStep(32)
+        self.blocksize_slider.setPageStep(128)
+        self.blocksize_slider.valueChanged.connect(self.update_blocksize_from_slider)
+
+        layout.addWidget(QLabel("Blocksize (frames)"))
+        layout.addWidget(self.blocksize_slider)
+        layout.addWidget(self.blocksize_label)
+
+        self.blocksize_label.setText(f"Blocksize: {BLOCKSIZE} frames")
+
         # R SLIDER
         self.chaos_morph_slider = QSlider(Qt.Horizontal)
-        self.chaos_morph_slider.setMaximum(3.0)
-        self.chaos_morph_slider.setMaximum(4.0)
-        self.chaos_morph_slider.setValue(3.1)
+        self.chaos_morph_slider.setMinimum(0)
+        self.chaos_morph_slider.setMaximum(100)
+        self.chaos_morph_slider.setValue(50)  # 50%
         self.chaos_morph_slider.valueChanged.connect(self.update_chaos_morph)
         layout.addWidget(QLabel("Chaos Morph"))
         layout.addWidget(self.chaos_morph_slider)
@@ -180,7 +199,7 @@ class FractSynthGUI(QWidget):
         self.le_timer = QTimer()
         self.le_timer.timeout.connect(self.update_le_plot)
         
-        self.le_timer.start(500)
+        self.le_timer.start(2000)
         
         layout.addWidget(QLabel("Virtual Piano"))
         layout.addWidget(self.piano)
@@ -193,18 +212,33 @@ class FractSynthGUI(QWidget):
         main_layout.addLayout(right_layout)
         self.setLayout(main_layout)
 
+        
+
+        # keep synth + stream in sync
+        self.synth.set_blocksize(BLOCKSIZE)
+        
+
         self.stream = sd.OutputStream(
             callback=self.synth.audio_callback,
             samplerate=44100,
             channels=2,
-            blocksize=512
+            dtype='float32',
+            blocksize=BLOCKSIZE,          # You can raise this to 1024 if skips persist
+            latency='high',         # or latency=0.06 for ~60ms buffer
+            dither_off=True
         )
-        
+
         self.stream.start()
 
+        self._vis_counter = 0
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_visuals)
-        self.timer.start(200)
+        self.timer.start(150)  # 10 FPS base
+
+        # in update_visuals:
+        self._vis_counter = (self._vis_counter + 1) % 3  # update every 3rd tick (~3–4 FPS)
+        if self._vis_counter != 0:
+            return
 
     def update_r(self, value):
         self.synth.set_r(value / 100)
@@ -227,7 +261,7 @@ class FractSynthGUI(QWidget):
 
     def update_visuals(self):
         if self.synth.playing:
-            buf = self.synth.generate(512)
+            buf = self.synth.generate(self.synth.frames)
             self.plot.update_plot(buf)
         if self.synth.engines and hasattr(self.synth.engines[0], 'get_history'):
             self.chaos_display.update_visual(self.synth.engines[0])
@@ -238,6 +272,8 @@ class FractSynthGUI(QWidget):
 
     def handle_piano_note(self, freq):
         self.synth.set_freq(freq)
+        self.synth.env.note_off()
+        self.synth.flush_queue()
         self.synth.env.note_on()
         self.synth.playing = True
         self.toggle_button.setText("Stop")
@@ -268,15 +304,16 @@ class FractSynthGUI(QWidget):
         self.synth.env.release = int(value * self.synth.sample_rate / 1000)
 
     # CHAOS MORPH
-    def update_chaos_morph(self, value):
-        self.synth.chaos_morph = value
+    def update_chaos_morph(self, value: int):
+        # map 0..100 slider to 0.0..1.0
+        self.synth.chaos_morph = value / 100.0
 
     # LYAPUNOV CALC
     def update_lyapunov_label(self):
         if hasattr(self.synth, 'attractor') and self.synth.attractor is not None:
             if hasattr(self.synth.attractor, 'lyapunov_exponent'):
                 func = self.synth.attractor.get_map_function()
-                le, _ = calculate_lyapunov(self.synth.attractor, func)
+                le, _ = calculate_lyapunov(self.synth.attractor, func, steps=200, dt=0.01)
 
                 if le > 0:
                     self.old_le = le
@@ -333,3 +370,45 @@ class FractSynthGUI(QWidget):
         for i in range(1, len(data)):
             smoothed.append(alpha * data[i] + (1 - alpha) * smoothed[-1])
         return smoothed
+    
+    def update_blocksize_from_slider(self, value: int):
+        if value != self.current_blocksize:
+            self.recreate_stream(value)
+    '''
+    def _nearest_power_of_two(sef, n, min_pow=128, max_pow=16384):
+        n = max(min_pow, min(int(n), max_pow))
+        p = 1
+
+        while p < n:
+            p <<= 1
+
+        lower = p >> 1
+        if lower < min_pow: lower = min_pow
+        if abs(n - lower) <= abs(p - n): return lower
+        
+        return p
+    '''
+
+    def recreate_stream(self, new_blocksize: int):
+        try: 
+            if hasattr(self, "stream") and self.stream:
+                self.stream.stop()
+                self.stream.close()
+        except Exception:
+            pass
+
+        self.synth.set_blocksize(new_blocksize)
+        self.current_blocksize = new_blocksize
+        self.blocksize_label.setText(f"Blocksize: {new_blocksize} frames")
+
+        self.stream = sd.OutputStream(
+            callback=self.synth.audio_callback,
+            samplerate=44100,
+            channels=2,
+            dtype='float32',
+            blocksize=new_blocksize,
+            latency='high',
+            dither_off=True
+        )
+
+        self.stream.start()

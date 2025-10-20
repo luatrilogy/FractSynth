@@ -9,52 +9,83 @@ def _step_continuous(system_func, state, params, dt):
 def _step_discrete(system_func, state, params):
     return np.array(system_func(state, *params))
 
-def _lyapunov_continuous(attractor, initial_state, params, epsilon=1e-8, steps=10000, dt=0.01):
+
+def _lyapunov_continuous(system_func, initial_state, params,
+                         epsilon=1e-8, steps=10000, dt=0.01):
     x1 = np.array(initial_state, dtype=np.float64)
     x2 = x1 + np.random.normal(scale=epsilon, size=x1.shape)
 
     sum_lyap = 0.0
+    tiny = 1e-20
+
     for _ in range(steps):
-        f1 = np.array(attractor(x1, *params), dtype=np.float64)
-        f2 = np.array(attractor(x2, *params), dtype=np.float64)
+        # advance both states with simple Euler (your original approach)
+        f1 = np.array(system_func(x1, *params), dtype=np.float64)
+        f2 = np.array(system_func(x2, *params), dtype=np.float64)
 
         x1 = x1 + dt * f1
         x2 = x2 + dt * f2
 
-        delta_vec = x2 - x1
-        delta = np.linalg.norm(delta_vec)
-        if delta < 1e-12 or np.isnan(delta):
+        # sanitize states
+        if (not np.all(np.isfinite(x1))) or (not np.all(np.isfinite(x2))):
+            # reseed x2 near x1 and continue
+            x2 = x1 + np.random.normal(scale=epsilon, size=x1.shape)
             continue
 
-        sum_lyap += np.log(delta / epsilon)
+        delta_vec = x2 - x1
+        if not np.all(np.isfinite(delta_vec)):
+            x2 = x1 + np.random.normal(scale=epsilon, size=x1.shape)
+            continue
+
+        delta = np.linalg.norm(delta_vec)
+        if (not np.isfinite(delta)) or (delta < tiny):
+            delta = tiny
+
+        sum_lyap += np.log(max(delta / epsilon, tiny))
 
         # Renormalize perturbed point to be distance epsilon from x1
-        x2 = x1 + epsilon * (delta_vec / delta)
+        x2 = x1 + (epsilon * (delta_vec / delta))
 
     average_le = sum_lyap / (steps * dt)
     return average_le, [average_le] * steps
 
-def _lyapunov_discrete(system_func, initial_state, params, epsilon=1e-8, steps=int(1000)):
+
+def _lyapunov_discrete(system_func, initial_state, params,
+                       epsilon=1e-8, steps=1000):
     x1 = np.array(initial_state, dtype=np.float64)
     x2 = x1 + epsilon * np.random.normal(size=len(x1))
 
     le_sum = 0.0
     le_values = []
+    tiny = 1e-20
 
-    for _ in range(steps):
-        x1 = _step_discrete(system_func, x1, params)
-        x2 = _step_discrete(system_func, x2, params)
+    for k in range(steps):
+        # iterate the map for both points
+        x1 = np.array(system_func(x1, *params), dtype=np.float64)
+        x2 = np.array(system_func(x2, *params), dtype=np.float64)
 
-        delta = np.linalg.norm(x2 - x1)
-        if delta < 1e-12:
-            delta = 1e-12
+        # sanitize states
+        if (not np.all(np.isfinite(x1))) or (not np.all(np.isfinite(x2))):
+            x2 = x1 + epsilon * np.random.normal(size=len(x1))
+            le_values.append(le_sum / (k + 1))
+            continue
 
-        le_step = np.log(delta / epsilon)
+        diff = x2 - x1
+        if not np.all(np.isfinite(diff)):
+            x2 = x1 + epsilon * np.random.normal(size=len(x1))
+            le_values.append(le_sum / (k + 1))
+            continue
+
+        delta = np.linalg.norm(diff)
+        if (not np.isfinite(delta)) or (delta < tiny):
+            delta = tiny
+
+        le_step = np.log(max(delta / epsilon, tiny))
         le_sum += le_step
-        le_values.append(le_sum / (_ + 1))
+        le_values.append(le_sum / (k + 1))
 
-        # Renormalize perturbed state
-        x2 = x1 + epsilon * (x2 - x1) / delta
+        # re-normalize separation
+        x2 = x1 + epsilon * (diff / delta)
 
     return le_sum / steps, le_values
 

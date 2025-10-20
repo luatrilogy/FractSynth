@@ -1,6 +1,31 @@
 import numpy as np
 from scipy.integrate import odeint
 
+_HAS_CUPY = False
+_xp = np
+
+try:
+    import cupy as _cp
+    try:
+        # Only enable if at least one CUDA device is usable
+        if _cp.cuda.runtime.getDeviceCount() > 0:
+            _xp = _cp
+            _HAS_CUPY = True
+    except Exception:
+        _HAS_CUPY = False
+except Exception:
+    _HAS_CUPY = False
+
+def _to_xp(arr):
+    if _HAS_CUPY:
+        return _cp.asarray(arr)
+    return np.asarray(arr)
+
+def _to_numpy(arr):
+    if _HAS_CUPY:
+        return _cp.asnumpy(arr)
+    return np.asarray(arr)
+
 class LogisticMap:
     def __init__(self, r=3.9, x=0.5):
         self.r = float(r)
@@ -19,9 +44,31 @@ class LogisticMap:
             self.history.pop(0)
         #return self.x, 1 - self.x, self.x * (1 - self.x)
         return self.x, 0.0, 0.0
+    
+    def step_batch(self, frames):
+        x = float(self.x)
+        r = float(self.r)
+        xs = np.empty(frames, dtype=np.float32)
+        ys = np.empty(frames, dtype=np.float32)
+        zs = np.empty(frames, dtype=np.float32)
+
+        prev = x
+        for i in range(frames):
+            x = r * x * (1.0 - x)
+            xs[i] = x
+            ys[i] = x - prev          # simple derivative proxy → nonzero amp
+            zs[i] = (i / max(1, frames-1)) * 2.0 - 1.0  # sweep pan [-1,1]
+            prev = x
+
+            self.history.append(x)
+            while len(self.history) > 500:
+                self.history.pop(0)
+
+        self.x = float(x)
+        return xs, ys, zs
 
     def get_history(self):
-        return [np.array(self.history)]
+        return (np.asarray(self.history, np.float32),)
     
     def get_state(self):
         return (self.x,)
@@ -72,9 +119,34 @@ class HenonMap:
             self.history_y.pop(0)
         #return self.x, self.y, self.x * self.y
         return self.x, 0.0, 0.0 
+    
+    def step_batch(self, frames):
+        xp = np  # we’ll keep CPU here; GPU adds no benefit for this tiny loop
+        a = self.a; b = self.b
+        x = float(self.x); y = float(self.y)
+
+        xs = xp.empty(frames, dtype=xp.float32)
+        ys = xp.empty(frames, dtype=xp.float32)
+        zs = xp.zeros(frames, dtype=xp.float32)  # pan can be 0 if you like
+
+        for i in range(frames):
+            nx = 1.0 - a * x * x + y
+            ny = b * x
+            x, y = nx, ny
+            xs[i] = x; ys[i] = y
+
+            self.history_x.append(float(x))
+            self.history_y.append(float(y))
+            while len(self.history_x) > 500:
+                self.history_x.pop(0); self.history_y.pop(0)
+
+        self.x, self.y = float(x), float(y)
+        return xs, ys, zs
 
     def get_history(self):
-        return [np.array(self.history_x), np.array(self.history_y)]
+        return (np.asarray(self.history_x, np.float32),
+                np.asarray(self.history_y, np.float32))
+
     
     def get_state(self):
         return (self.x, self.y)
@@ -124,9 +196,37 @@ class LorenzAttractor:
         if len(self.history) > 500:
             self.history.pop(0)
         return self.x*2, self.y*2, self.z*2
+    
+    def step_batch(self, frames):
+        sigma, rho, beta, dt = self.sigma, self.rho, self.beta, self.dt
+        x = float(self.x); y = float(self.y); z = float(self.z)
+
+        xs = np.empty(frames, dtype=np.float32)
+        ys = np.empty(frames, dtype=np.float32)
+        zs = np.empty(frames, dtype=np.float32)
+
+        for i in range(frames):
+            dx = sigma * (y - x)
+            dy = x * (rho - z) - y
+            dz = x * y - beta * z
+            x += dx * dt
+            y += dy * dt
+            z += dz * dt
+
+            xs[i] = x; ys[i] = y; zs[i] = z
+            self.history.append((float(x), float(y), float(z)))
+            while len(self.history) > 500:
+                self.history.pop(0)
+
+        self.x, self.y, self.z = float(x), float(y), float(z)
+        return xs, ys, zs
 
     def get_history(self):
-        return zip(*self.history[-2000:])
+        if not self.history:
+            return (np.array([], np.float32), np.array([], np.float32), np.array([], np.float32))
+        hx, hy, hz = zip(*self.history[-2000:])
+        return (np.asarray(hx, np.float32), np.asarray(hy, np.float32), np.asarray(hz, np.float32))
+
     
     def get_state(self):
         return (self.x, self.y, self.z)
@@ -197,11 +297,53 @@ class DuffingOscillator:
 
         # Return final state (audio-rate point)
         return x_vals[-1], v_vals[-1], self.t_span[-1]
+    
+    def step_batch(self, frames):
+        '''Manual RK4 integrator across a block; GPU-friendly and avoids odeint in the callback loop XD'''
+
+        xp = _xp
+        dt = 1.0/44100.0 # tie to audio rate
+        x = float(self.initial_state[0])
+        v = float(self.initial_state[1])
+        t = float(self.t)
+        xs = xp.empty(frames, dtype=xp.float32)
+        vs = xp.empty(frames, dtype=xp.float32)
+
+        for i in range(frames):
+            # defining Duffing deriviaties
+            def f_x(x, v, t): return v
+            def f_v(x, v, t): return -self.delta * v - self.alpha * x - self.beta * x**3 + self.gamma * np.cos(self.omega * t)
+
+            k1x = f_x(x, v, t);         k1v = f_v(x, v, t)
+            k2x = f_x(x + 0.5*dt*k1x, v + 0.5*dt*k1v, t + 0.5*dt);  k2v = f_v(x + 0.5*dt*k1x, v + 0.5*dt*k1v, t + 0.5*dt)
+            k3x = f_x(x + 0.5*dt*k2x, v + 0.5*dt*k2v, t + 0.5*dt);  k3v = f_v(x + 0.5*dt*k2x, v + 0.5*dt*k2v, t + 0.5*dt)
+            k4x = f_x(x + dt*k3x, v + dt*k3v, t + dt);              k4v = f_v(x + dt*k3x, v + dt*k3v, t + dt)
+            x += (dt/6.0)*(k1x + 2*k2x + 2*k3x + k4x)
+            v += (dt/6.0)*(k1v + 2*k2v + 2*k3v + k4v)
+            t += dt
+            xs[i] = x; vs[i] = v
+            
+            self.history.append((float(x), float(v), float(t)))
+            if len(self.history) > 500:
+                self.history.pop(0)
+            self.initial_state = [float(x), float(v)]
+            self.t = float(t)
+            z = xp.linspace(-1.0, 1.0, frames, dtype=xp.float32)
+            return _to_numpy(xs), _to_numpy(vs), _to_numpy(z)
 
     def get_history(self):
         if not self.history:
-            return [np.array([]), np.array([]), np.array([])]
-        return [np.array(x) for x in zip(*self.history[-2000:])]
+            return (
+                np.array([], dtype=np.float32),
+                np.array([], dtype=np.float32),
+                np.array([], dtype=np.float32),
+            )
+        hx, hv, ht = zip(*self.history[-2000:])
+        return (
+            np.asarray(hx, dtype=np.float32),
+            np.asarray(hv, dtype=np.float32),
+            np.asarray(ht, dtype=np.float32),
+        )
     
     def modulate_params(self, time, velocity=1.0):
         self.alpha = -1.0 + 0.5 * np.sin(0.1 * time)

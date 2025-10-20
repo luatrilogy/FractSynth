@@ -18,6 +18,7 @@ class SpectrumPlot(QLabel):
         self.setFixedHeight(150)
 
     def update_plot(self, signal):
+        signal = signal[-2048:]
         spectrum = np.abs(fft(signal))[:len(signal)//2]
         if np.max(spectrum) > 0:
             spectrum /= np.max(spectrum)
