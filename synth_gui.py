@@ -1,3 +1,4 @@
+import threading
 import sounddevice as sd
 
 from piano import PianoWidget
@@ -69,7 +70,7 @@ class FractSynthGUI(QWidget):
         layout.addWidget(self.chaos_type_box)
 
         # BLOCKSIZE SLIDER
-        BLOCKSIZE = 8192 #6144 
+        BLOCKSIZE = 512 #6144 
         self.current_blocksize = BLOCKSIZE
 
         self.blocksize_label = QLabel("Blocksize - ")
@@ -189,17 +190,17 @@ class FractSynthGUI(QWidget):
 
         right_layout.addWidget(self.chaos_display)
 
-        self.figure = Figure()
-        self.ax = self.figure.add_subplot(111)
-        self.canvas = FigureCanvas(self.figure)
+        #self.figure = Figure()
+        #self.ax = self.figure.add_subplot(111)
+        #self.canvas = FigureCanvas(self.figure)
 
-        right_layout.addWidget(self.canvas)
+        #right_layout.addWidget(self.canvas)
         
         # LE PLOT OVERTIME
         self.le_timer = QTimer()
-        self.le_timer.timeout.connect(self.update_le_plot)
-        
+        self.le_timer.timeout.connect(self.update_lyapunov_label)
         self.le_timer.start(2000)
+        self.le_timer.start()
         
         layout.addWidget(QLabel("Virtual Piano"))
         layout.addWidget(self.piano)
@@ -212,12 +213,9 @@ class FractSynthGUI(QWidget):
         main_layout.addLayout(right_layout)
         self.setLayout(main_layout)
 
-        
-
         # keep synth + stream in sync
         self.synth.set_blocksize(BLOCKSIZE)
         
-
         self.stream = sd.OutputStream(
             callback=self.synth.audio_callback,
             samplerate=44100,
@@ -234,11 +232,6 @@ class FractSynthGUI(QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_visuals)
         self.timer.start(150)  # 10 FPS base
-
-        # in update_visuals:
-        self._vis_counter = (self._vis_counter + 1) % 3  # update every 3rd tick (~3–4 FPS)
-        if self._vis_counter != 0:
-            return
 
     def update_r(self, value):
         self.synth.set_r(value / 100)
@@ -260,15 +253,14 @@ class FractSynthGUI(QWidget):
         self.chaos_type_box.setCurrentText(p.get("type", "Logistic"))
 
     def update_visuals(self):
-        if self.synth.playing:
-            buf = self.synth.generate(self.synth.frames)
-            self.plot.update_plot(buf)
-        if self.synth.engines and hasattr(self.synth.engines[0], 'get_history'):
-            self.chaos_display.update_visual(self.synth.engines[0])
+        self._vis_counter = (self._vis_counter + 1) % 3  # ~3–4 FPS
+        if self._vis_counter != 0:
+            return
 
-        if self.synth.attractor is not None:
-            self.update_lyapunov_label()
-            
+        if self.synth.playing and getattr(self.synth, "last_block", None) is not None:
+            self.plot.update_plot(self.synth.last_block)
+        if self.synth.engines and hasattr(self.synth.engines[0], 'get_history'):
+            self.chaos_display.update_visual(self.synth.engines[0])          
 
     def handle_piano_note(self, freq):
         self.synth.set_freq(freq)
@@ -277,7 +269,7 @@ class FractSynthGUI(QWidget):
         self.synth.env.note_on()
         self.synth.playing = True
         self.toggle_button.setText("Stop")
-
+ 
     def toggle_playback(self):
         if self.synth.playing:
             self.synth.env.note_off()
@@ -313,7 +305,7 @@ class FractSynthGUI(QWidget):
         if hasattr(self.synth, 'attractor') and self.synth.attractor is not None:
             if hasattr(self.synth.attractor, 'lyapunov_exponent'):
                 func = self.synth.attractor.get_map_function()
-                le, _ = calculate_lyapunov(self.synth.attractor, func, steps=200, dt=0.01)
+                le, _ = calculate_lyapunov(self.synth.attractor, func, steps=50, dt=0.01)
 
                 if le > 0:
                     self.old_le = le
@@ -336,6 +328,8 @@ class FractSynthGUI(QWidget):
 
     # LE PLOT OVER TIME
     def update_le_plot(self):
+        pass
+    '''
         if hasattr(self.synth, "attractor") and self.synth.attractor is not None:
             le = self.synth.attractor.lyapunov_exponent
             self.le_history.append(le)
@@ -360,6 +354,7 @@ class FractSynthGUI(QWidget):
             
             self.ax.legend()
             self.canvas.draw()
+            '''
     
     # SMOOTH SERIRES
     def smooth_series(data, alpha=0.2):

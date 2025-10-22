@@ -18,7 +18,7 @@ try:
 except Exception:
     _HAS_CUPY = False
 
-from chaos import LogisticMap, HenonMap, LorenzAttractor, DuffingOscillator
+from chaos import LogisticMap, HenonMap, LorenzAttractor #, DuffingOscillator
 
 def to_xp(a):
     return xp.asarray(a)
@@ -197,9 +197,9 @@ class FractSynth:
             # normalization (preserve relative chaos shape)
             def norm_pm1(a):
                 a = a - a.mean()
-                s = xp.percentile(xp.abs(a), 95)
+                s = a.std()
                 s = s if s > 1e-6 else 1.0
-                return xp.clip(a / s, -1.0, 1.0)
+                return np.clip(a / (3.0*s), -1.0, 1.0)
 
             x_n = norm_pm1(xb)
             y_n = norm_pm1(yb)
@@ -260,6 +260,8 @@ class FractSynth:
     def audio_callback(self, outdata, frames, time, status):
         try:
             block = self.q.get_nowait()
+            self.last_block = block
+
             if block.shape[0] != frames:
                 # pad or trim to the requested size
                 if block.shape[0] < frames:
